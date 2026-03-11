@@ -16,6 +16,13 @@ include $(DEVKITARM)/ds_rules
 # MAXMOD_SOUNDBANK contains a directory of music and sound effect files
 #---------------------------------------------------------------------------------
 TARGET		:=	$(shell basename $(CURDIR))
+
+export GAME_TITLE      := hChat-DS
+export GAME_SUBTITLE1  := Hreniuc Chat Client
+export GAME_SUBTITLE2  := for the Nintendo DS
+export GAME_AUTHOR     := texula
+export GAME_ICON     := icon.bmp
+
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
