@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
+#include <sys/ioctl.h>
 
 #define SERVER_PORT 5050
 #define SERVER_IP "37.143.163.56"
@@ -15,17 +16,16 @@
 char chat_user[32] = {0};
 char chat_pass[32] = {0};
 
-// TWiLight Menu++ / nds-bootstrap leaves hardware registers in a dirty state.
-// This function forces the scroll registers back to zero so the 
-// keyboard and console don't slide or artifact.
+PrintConsole topScreen;
+PrintConsole bottomScreen;
+
+// Hardware cleanup for TWiLight Menu++ / nds-bootstrap
 void sanitize_hardware(void) {
-    // Reset sub screen scroll registers (Bottom Screen)
     REG_BG0HOFS_SUB = 0; REG_BG0VOFS_SUB = 0;
     REG_BG1HOFS_SUB = 0; REG_BG1VOFS_SUB = 0;
     REG_BG2HOFS_SUB = 0; REG_BG2VOFS_SUB = 0;
     REG_BG3HOFS_SUB = 0; REG_BG3VOFS_SUB = 0;
 
-    // Reset main screen scroll registers (Top Screen)
     REG_BG0HOFS = 0; REG_BG0VOFS = 0;
     REG_BG1HOFS = 0; REG_BG1VOFS = 0;
     REG_BG2HOFS = 0; REG_BG2VOFS = 0;
@@ -33,17 +33,8 @@ void sanitize_hardware(void) {
 }
 
 void get_user_input(const char* prompt, char* buffer, int max_len) {
-    // 1. Initialize the keyboard on the bottom screen (Sub engine)
-    Keyboard* kb = keyboardGetDefault();
-    keyboardInit(kb, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, false, true);
-    
-    // NDS-BOOTSTRAP FIX: Force the keyboard's internal background scroll to 0
-    bgSetScroll(kb->background, 0, 0);
-    bgUpdate();
-
-    keyboardShow();
-    
-    // 2. The text prompt will now print safely to the TOP screen
+    consoleSelect(&bottomScreen);
+    printf("\x1b[2J"); // Clear window
     printf("\n%s\n> ", prompt);
     
     int index = 0;
@@ -53,42 +44,41 @@ void get_user_input(const char* prompt, char* buffer, int max_len) {
         
         if (c == '\n') { 
             buffer[index] = '\0';
-            printf("\n"); // Move to next line on top screen
             break;
         } else if (c == '\b' && index > 0) {
             index--;
-            printf("\b \b"); // Erase character on top screen
+            printf("\b \b"); 
         } else if (c > 0 && index < max_len - 1) {
             buffer[index++] = (char)c;
-            printf("%c", (char)c); // Show typed character on top screen
+            printf("%c", (char)c); 
         }
     }
-
-    // Hide keyboard when done
-    keyboardHide();
 }
 
 int main(void) {
-    // Clean up dirty hardware state left by nds-bootstrap / TWiLight Menu
     sanitize_hardware();
 
-    // Initialize Video and VRAM Banks correctly
     videoSetMode(MODE_0_2D);
     videoSetModeSub(MODE_0_2D);
     vramSetBankA(VRAM_A_MAIN_BG);
     vramSetBankC(VRAM_C_SUB_BG);
 
-    // ONLY initialize a console for the TOP screen. 
-    PrintConsole topScreen;
+    // TOP SCREEN: Incoming chat logs only!
     consoleInit(&topScreen, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
+    
+    // BOTTOM SCREEN: Typing Console (Top 6 rows)
+    consoleInit(&bottomScreen, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0, false, true);
+    consoleSetWindow(&bottomScreen, 0, 0, 32, 6); 
+
+    // BOTTOM SCREEN: Keyboard (Background 3, map base 20 to prevent visual tearing)
+    Keyboard* kb = keyboardGetDefault();
+    keyboardInit(kb, 3, BgType_Text4bpp, BgSize_T_256x256, 20, 0, false, true);
+    bgSetScroll(kb->background, 0, 0); // Fix nds-bootstrap shifting
+    keyboardShow();
+
     consoleSelect(&topScreen);
+    printf("--- DSi Chat Setup ---\nConnecting to WiFi...\n");
 
-    printf("--- DSi Chat Setup ---\n");
-    printf("Connecting to WiFi...\n");
-
-    // --- WIFI INIT MUST BE DONE EARLY ---
-    // We connect to Wi-Fi immediately so the ARM7 coprocessor doesn't time out 
-    // while waiting for the user to slowly type their username and password.
     if (!Wifi_InitDefault(WFC_CONNECT)) {
         printf("WiFi failed!\n");
         while (1) swiWaitForVBlank();
@@ -97,11 +87,10 @@ int main(void) {
     
     printf("WiFi Connected!\n");
 
-    // The input function will use the bottom screen for the keyboard,
-    // but it will print our typing onto the top screen!
     get_user_input("Enter Username:", chat_user, 32);
     get_user_input("Enter Password:", chat_pass, 32);
 
+    consoleSelect(&topScreen);
     printf("\nUser: %s\nConnecting to Server...\n", chat_user);
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -115,7 +104,10 @@ int main(void) {
         while (1) swiWaitForVBlank();
     }
 
-    // Set socket to non-blocking mode so the UI doesn't freeze while waiting for messages
+    // --- NON-BLOCKING SOCKET SETUP ---
+    // dswifi heavily relies on ioctl for non-blocking states, fcntl alone is unreliable here!
+    int nonBlock = 1;
+    ioctl(sock, FIONBIO, &nonBlock); 
     fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
 
     char loginCmd[256];
@@ -124,34 +116,70 @@ int main(void) {
 
     bool loggedIn = false;
     char netBuffer[1024];
-    int frameCounter = 0;
+    
+    char myInput[128] = {0};
+    int inputLen = 0;
+
+    // Reset bottom screen for typing mode
+    consoleSelect(&bottomScreen);
+    printf("\x1b[2J> "); 
 
     while (1) {
-        scanKeys();
-        int pressed = keysDown();
-
-        if (loggedIn && (pressed & KEY_A)) {
-            char msg[] = "MSG|Hello!\n";
-            send(sock, msg, strlen(msg), 0);
-            // Print local feedback on the top screen
-            printf("[%s]: Hello!\n", chat_user);
+        // --- 1. HANDLE KEYBOARD TYPING ---
+        int key = keyboardUpdate();
+        if (key > 0) {
+            consoleSelect(&bottomScreen); // Switch to typing window
+            
+            if (key == '\n') {
+                if (loggedIn && inputLen > 0) {
+                    char finalMsg[256];
+                    snprintf(finalMsg, sizeof(finalMsg), "MSG|%s\n", myInput);
+                    send(sock, finalMsg, strlen(finalMsg), 0);
+                    
+                    // We DO NOT print the message to topScreen here! 
+                    // We wait for the server to echo it back so we know it actually sent.
+                    
+                    // Reset input buffer & clear bottom screen
+                    memset(myInput, 0, sizeof(myInput));
+                    inputLen = 0;
+                    printf("\x1b[2J> "); 
+                }
+            } else if (key == '\b') {
+                if (inputLen > 0) {
+                    myInput[--inputLen] = '\0';
+                    printf("\b \b");
+                }
+            } else if (inputLen < 100) {
+                myInput[inputLen++] = (char)key;
+                myInput[inputLen] = '\0';
+                printf("%c", key);
+            }
         }
 
-        // NETWORK POLL
-        // Throttling recv() to run every 20 frames. 
-        // Bombarding the DSi's tiny Wi-Fi chip 60 times a second can crash it!
-        frameCounter++;
-        if (frameCounter > 20) {
-            frameCounter = 0;
+        // --- 2. HANDLE NETWORK RECEIVE ---
+        fd_set readfds;
+        struct timeval tv;
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0; 
+
+        // select() peeks to see if data is ready. Prevents the DS from freezing on recv!
+        if (select(sock + 1, &readfds, NULL, NULL, &tv) > 0) {
             int bytes = recv(sock, netBuffer, sizeof(netBuffer) - 1, 0);
             
             if (bytes > 0) {
                 netBuffer[bytes] = '\0';
+                
+                // Switch to Top Screen to print incoming chat data!
+                consoleSelect(&topScreen); 
+                
                 if (!loggedIn && strstr(netBuffer, "OK|LOGIN")) {
                     loggedIn = true;
-                    printf("Auth Success!\nTap A to say Hi.\n");
+                    printf("\x1b[32m--- Auth Success! ---\x1b[39m\nYou can now type below.\n");
                 } else if (loggedIn) {
-                    printf("%s", netBuffer);
+                    // This prints incoming messages AND our own echoed messages
+                    printf("%s\n", netBuffer); 
                 }
             }
         }
