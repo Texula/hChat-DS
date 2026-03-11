@@ -1,0 +1,9 @@
+# Ignore build folders and compiled files
+build/
+*.nds
+*.elf
+*.o
+*.d
+
+# Ignore VS Code workspace settings
+.vscode/
