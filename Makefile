@@ -21,7 +21,7 @@ export GAME_TITLE      := hChat-DS
 export GAME_SUBTITLE1  := Hreniuc Chat Client
 export GAME_SUBTITLE2  := for the Nintendo DS
 export GAME_AUTHOR     := texula
-export GAME_ICON     := icon.bmp
+export GAME_ICON     := ../icon.bmp
 
 BUILD		:=	build
 SOURCES		:=	source
